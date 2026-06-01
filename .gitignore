@@ -1,0 +1,10 @@
+.env
+bot_stdout.log
+bot_stderr.log
+__pycache__/
+*.pyc
+html_analysis.txt
+live_matches.json
+nz_ire.html
+page_text.txt
+*.txt

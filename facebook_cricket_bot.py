@@ -18,7 +18,12 @@ if hasattr(sys.stdout, 'reconfigure'):
 load_dotenv()
 
 FB_PAGE_ID = os.getenv("FB_PAGE_ID")
+if FB_PAGE_ID:
+    FB_PAGE_ID = FB_PAGE_ID.strip()
+
 FB_ACCESS_TOKEN = os.getenv("FB_ACCESS_TOKEN")
+if FB_ACCESS_TOKEN:
+    FB_ACCESS_TOKEN = FB_ACCESS_TOKEN.strip()
 
 # File to store the last posted scores to avoid duplicate posts
 LAST_POST_FILE = "last_post.json"

@@ -479,7 +479,7 @@ def format_score_post(match_info):
         
     post_lines.append(f"💬 **Status:** {status}")
     post_lines.append("━━━━━━━━━━━━━━━━━━━━")
-    post_lines.append("#Cricket #LiveScore #CricketUpdates #FacebookBot")
+    post_lines.append("#Cricket #LiveScore #CricketUpdates #CricketFans")
     
     return "\n".join(post_lines)
 

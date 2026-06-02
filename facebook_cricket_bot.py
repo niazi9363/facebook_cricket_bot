@@ -483,6 +483,175 @@ def format_score_post(match_info):
     
     return "\n".join(post_lines)
 
+def is_international_match(title):
+    # Split by 'vs'
+    parts = re.split(r'\s+vs\.?\s+', title, flags=re.I)
+    if len(parts) < 2:
+        return False
+    
+    team1 = parts[0].strip().upper()
+    team2 = re.split(r',', parts[1])[0].strip().upper() # Extract team2 name before comma
+    
+    # Check if they match FLAG_MAPPING keys or values
+    def is_country(team_name):
+        if team_name in FLAG_MAPPING:
+            return True
+        for key in FLAG_MAPPING.keys():
+            if len(key) > 2 and (key in team_name or team_name in key):
+                return True
+        return False
+        
+    return is_country(team1) and is_country(team2)
+
+def get_squad_info(match_id):
+    """
+    Fetches the squad page for the match and returns a set of lowercase player names and a set of profile IDs.
+    """
+    squad_url = f"https://www.cricbuzz.com/cricket-match-squads/{match_id}"
+    try:
+        res = requests.get(squad_url, headers=HEADERS, timeout=15)
+        if res.status_code != 200:
+            return set(), set()
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        player_links = soup.find_all('a', href=re.compile(r'/profiles/(\d+)'))
+        squad_ids = set()
+        squad_names = set()
+        for l in player_links:
+            m = re.search(r'/profiles/(\d+)/', l['href'])
+            if m:
+                squad_ids.add(m.group(1))
+            name = l.text.strip().lower()
+            if name:
+                squad_names.add(name)
+                # Split by space and add individual parts (like last name)
+                for part in name.split():
+                    if len(part) > 2:
+                        squad_names.add(part)
+        return squad_ids, squad_names
+    except Exception as e:
+        print(f"[-] Error fetching squad info for {match_id}: {e}")
+        return set(), set()
+
+def get_match_preview_alert(match_id, match_title):
+    """
+    Scrapes the match preview article from Cricbuzz news tab, filters it using squads, and returns a formatted post.
+    """
+    squad_ids, squad_names = get_squad_info(match_id)
+    
+    news_url = f"https://www.cricbuzz.com/cricket-match-news/{match_id}"
+    try:
+        res = requests.get(news_url, headers=HEADERS, timeout=15)
+        if res.status_code != 200:
+            return None
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # Look for news articles whose title or link contains "preview"
+        links = soup.find_all('a', href=re.compile(r'/cricket-news/\d+/'))
+        preview_url = None
+        for l in links:
+            text = l.text.strip().lower()
+            href = l['href'].lower()
+            if "preview" in text or "preview" in href:
+                preview_url = "https://www.cricbuzz.com" + l['href']
+                break
+                
+        if not preview_url:
+            # Fallback: search cricbuzz homepage for matching preview news
+            home_res = requests.get("https://www.cricbuzz.com/", headers=HEADERS, timeout=15)
+            home_soup = BeautifulSoup(home_res.text, 'html.parser')
+            home_links = home_soup.find_all('a', href=re.compile(r'/cricket-news/\d+/'))
+            
+            # Split match title to get team names
+            teams = [t.strip().lower() for t in re.split(r'\s+vs\.?\s+', match_title, flags=re.I)]
+            if len(teams) >= 2:
+                team1_clean = re.split(r',', teams[0])[0].strip()
+                team2_clean = re.split(r',', teams[1])[0].strip()
+                for hl in home_links:
+                    htext = hl.text.strip().lower()
+                    if (team1_clean in htext or team2_clean in htext) and "preview" in htext:
+                        preview_url = "https://www.cricbuzz.com" + hl['href']
+                        break
+                        
+        if not preview_url:
+            return None
+            
+        art_res = requests.get(preview_url, headers=HEADERS, timeout=15)
+        if art_res.status_code != 200:
+            return None
+            
+        art_soup = BeautifulSoup(art_res.text, 'html.parser')
+        paras = art_soup.find_all('p')
+        
+        team_news = []
+        stats_trivia = []
+        
+        for p in paras:
+            text = p.text.strip()
+            if not text or len(text) < 15:
+                continue
+                
+            # Filter by squad profile links
+            profile_links = p.find_all('a', href=re.compile(r'/profiles/(\d+)'))
+            skip_para = False
+            for pl in profile_links:
+                m = re.search(r'/profiles/(\d+)/', pl['href'])
+                if m:
+                    pid = m.group(1)
+                    # If squad is loaded and the player is not in it, skip this paragraph
+                    if squad_ids and pid not in squad_ids:
+                        skip_para = True
+                        break
+            if skip_para:
+                continue
+                
+            text_lower = text.lower()
+            if any(kw in text_lower for kw in ["injury", "injured", "squad", "miss", "ruled out", "fit", "fitness", "team news", "playing xi", "selection"]):
+                team_news.append(text)
+            elif any(kw in text_lower for kw in ["needs", "runs to", "wickets to", "did you know", "stat", "record", "history", "milestone", "fifty", "century", "average", "strike rate"]):
+                stats_trivia.append(text)
+                
+        # Format the post
+        if not team_news and not stats_trivia:
+            # Fallback to general preview description paragraphs if no specific keyword matches
+            desc_paras = [p.text.strip() for p in paras if len(p.text.strip()) > 30][:3]
+            stats_trivia = desc_paras
+            
+        post_lines = [
+            "🔥 **UPCOMING MATCH PREVIEW & STATS** 🔥",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"🏆 **Match:** {add_flags_to_title(match_title)}",
+            "📅 **Status:** Preview (Starting soon)",
+            ""
+        ]
+        
+        if team_news:
+            post_lines.append("🚑 **TEAM & INJURY NEWS:**")
+            for tn in team_news[:3]:
+                post_lines.append(f"  📌 {tn}")
+            post_lines.append("")
+            
+        if stats_trivia:
+            post_lines.append("📈 **STATS & KEY FACTS:**")
+            for st in stats_trivia[:4]:
+                post_lines.append(f"  ⭐ {st}")
+            post_lines.append("")
+            
+        post_lines.append("━━━━━━━━━━━━━━━━━━━━")
+        clean_title = re.sub(r'[^a-zA-Z0-9\s]', '', match_title)
+        teams = [t.strip().replace(' ', '') for t in re.split(r'\s+vs\.?\s+', clean_title, flags=re.I)]
+        hashtags = "#Cricket #LiveScore #CricketFans"
+        if len(teams) >= 2:
+            team1_clean = re.split(r',', teams[0])[0].strip()
+            team2_clean = re.split(r',', teams[1])[0].strip()
+            hashtags = f"#{team1_clean}vs{team2_clean} #CricketStats {hashtags}"
+        post_lines.append(hashtags)
+        
+        return "\n".join(post_lines)
+    except Exception as e:
+        print(f"[-] Error parsing preview for match {match_id}: {e}")
+        return None
+
 def post_to_facebook(message):
     """
     Posts the message to the Facebook Page.
@@ -543,7 +712,7 @@ def run_bot(dry_run=False):
     
     # Load last posted score cache
     last_post_cache = load_last_post()
-    new_cache = {}
+    new_cache = dict(last_post_cache)
     
     for match_info in matches:
         match_id = match_info["id"]
@@ -553,14 +722,42 @@ def run_bot(dry_run=False):
         if not info:
             continue
         
-        # Only post matches that are currently active/live
         status_lower = info["status"].lower()
+        
+        # Check if it is a preview-state match
+        is_preview = "preview" in status_lower
+        if is_preview:
+            if is_international_match(info["title"]):
+                preview_key = f"preview_{match_id}"
+                if last_post_cache.get(preview_key) != "posted":
+                    print(f"[*] Fetching preview and stats alert for {info['title']}...")
+                    preview_msg = get_match_preview_alert(match_id, info["title"])
+                    if preview_msg:
+                        print("\n--- PREVIEW FACEBOOK POST ---")
+                        print(preview_msg)
+                        print("-----------------------------\n")
+                        
+                        if dry_run:
+                            print("[*] Dry run mode active. Skipping Facebook post.")
+                            new_cache[preview_key] = "posted"
+                        else:
+                            success = post_to_facebook(preview_msg)
+                            if success:
+                                new_cache[preview_key] = "posted"
+                                save_last_post(new_cache)
+                    else:
+                        print(f"[-] No preview details found for {info['title']}.")
+            else:
+                print(f"[*] Match {info['title']} is a league/non-international preview. Skipping.")
+            continue
+            
+        # Only post matches that are currently active/live
         is_live = False
         
         # Live indicators
         if any(kw in status_lower for kw in ['live', 'need', 'trail by', 'lead by', 'opt to', 'delayed', 'rain']):
             is_live = True
-        elif info["scores"] and not any(kw in status_lower for kw in ['won by', 'won', 'beat', 'complete', 'completed', 'preview', 'stumps', 'abandoned', 'no result']):
+        elif info["scores"] and not any(kw in status_lower for kw in ['won by', 'won', 'beat', 'complete', 'completed', 'stumps', 'abandoned', 'no result']):
             is_live = True
             
         if not is_live:

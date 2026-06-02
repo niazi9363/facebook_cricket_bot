@@ -7,7 +7,7 @@ on:
   workflow_dispatch: # Allows manual trigger from GitHub UI
 
 permissions:
-  contents: write # Allows committing updated cache back to repository
+  contents: write
 
 jobs:
   run-bot:

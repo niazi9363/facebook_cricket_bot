@@ -652,6 +652,237 @@ def get_match_preview_alert(match_id, match_title):
         print(f"[-] Error parsing preview for match {match_id}: {e}")
         return None
 
+def get_match_summary_details(match_id, match_title, match_status):
+    """
+    Parses completed scorecard from Cricbuzz and formats a top performers summary.
+    """
+    url = f"https://www.cricbuzz.com/live-cricket-scorecard/{match_id}"
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=15)
+        if res.status_code != 200:
+            return None
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # Parse Batsmen
+        batsmen_list = []
+        bat_grids = soup.find_all('div', class_=lambda c: c and 'scorecard-bat-grid' in c)
+        for bg in bat_grids:
+            profile_link = bg.find('a', href=re.compile(r'/profiles/\d+/'))
+            if not profile_link:
+                continue
+            name = profile_link.text.strip()
+            cols = [c.text.strip() for c in bg.find_all(recursive=False) if c.text.strip()]
+            if len(cols) >= 3:
+                try:
+                    runs = int(cols[1])
+                    balls = int(cols[2])
+                    batsmen_list.append({
+                        "name": name,
+                        "runs": runs,
+                        "balls": balls
+                    })
+                except ValueError:
+                    continue
+                    
+        batsmen_list.sort(key=lambda x: (x["runs"], -x["balls"]), reverse=True)
+        top_batsmen = batsmen_list[:3]
+        
+        # Parse Bowlers
+        bowlers_list = []
+        bowl_grids = soup.find_all('div', class_=lambda c: c and 'scorecard-bowl-grid' in c)
+        for bg in bowl_grids:
+            profile_link = bg.find('a', href=re.compile(r'/profiles/\d+/'))
+            if not profile_link:
+                continue
+            name = profile_link.text.strip()
+            cols = [c.text.strip() for c in bg.find_all(recursive=False) if c.text.strip()]
+            if len(cols) >= 5:
+                try:
+                    overs = cols[1]
+                    runs = int(cols[3])
+                    wickets = int(cols[4])
+                    bowlers_list.append({
+                        "name": name,
+                        "overs": overs,
+                        "runs": runs,
+                        "wickets": wickets
+                    })
+                except ValueError:
+                    continue
+                    
+        bowlers_list.sort(key=lambda x: (x["wickets"], -x["runs"]), reverse=True)
+        top_bowlers = bowlers_list[:3]
+        
+        post_lines = [
+            "🏆 **MATCH SUMMARY & RESULT** 🏆",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"🏆 **Match:** {add_flags_to_title(match_title)}",
+            f"💬 **Status:** {match_status}",
+            "",
+            "📊 **TOP PERFORMERS:**",
+            ""
+        ]
+        
+        if top_batsmen:
+            post_lines.append("🏏 **Top Batsmen:**")
+            for b in top_batsmen[:2]:
+                post_lines.append(f"  👉 {b['name']} - {b['runs']} runs off {b['balls']} balls")
+            post_lines.append("")
+            
+        if top_bowlers:
+            post_lines.append("🎳 **Top Bowlers:**")
+            for bow in top_bowlers[:2]:
+                post_lines.append(f"  👉 {bow['name']} - {bow['wickets']}/{bow['runs']} ({bow['overs']} overs)")
+            post_lines.append("")
+            
+        post_lines.append("━━━━━━━━━━━━━━━━━━━━")
+        clean_title = re.sub(r'[^a-zA-Z0-9\s]', '', match_title)
+        teams = [t.strip().replace(' ', '') for t in re.split(r'\s+vs\.?\s+', clean_title, flags=re.I)]
+        hashtags = "#Cricket #MatchSummary #CricketUpdates #CricketFans"
+        if len(teams) >= 2:
+            team1_clean = re.split(r',', teams[0])[0].strip()
+            team2_clean = re.split(r',', teams[1])[0].strip()
+            hashtags = f"#{team1_clean}vs{team2_clean} {hashtags}"
+        post_lines.append(hashtags)
+        
+        return "\n".join(post_lines)
+    except Exception as e:
+        print(f"[-] Error generating match summary for {match_id}: {e}")
+        return None
+
+def check_and_post_milestones(match_id, match_title, batsmen, bowlers, dry_run=False, last_post_cache=None, new_cache=None):
+    """
+    Parses active batters and bowlers to detect milestones (fifties, centuries, 3-fers, 5-fers).
+    Posts alerts to Facebook if new milestones are hit.
+    """
+    if not last_post_cache:
+        last_post_cache = {}
+    if not new_cache:
+        new_cache = {}
+        
+    # Check Batsmen Milestones
+    for b in batsmen:
+        match = re.match(r'([^\-*]+)\*?\s*-\s*(\d+)\s*\((\d+)\)', b)
+        if match:
+            player_name = match.group(1).strip()
+            try:
+                runs = int(match.group(2))
+                balls = int(match.group(3))
+            except ValueError:
+                continue
+                
+            # Century milestone
+            if runs >= 100:
+                milestone_key = f"milestone_{match_id}_{player_name}_100"
+                if last_post_cache.get(milestone_key) != "posted":
+                    msg = (
+                        f"💯 **CENTURY ALERT!** 💯\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🏆 **Match:** {add_flags_to_title(match_title)}\n\n"
+                        f"🔥 **{player_name}** has just scored a magnificent **CENTURY**! 🌟\n"
+                        f"👉 **{runs} runs** off just **{balls} balls**! What an incredible knock! 🏏👏\n\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"#Cricket #Milestone #Century #BattingHero #CricketFans"
+                    )
+                    print(f"\n--- BATSMAN MILESTONE ALERT (100) ---")
+                    print(msg)
+                    print("--------------------------------------\n")
+                    if dry_run:
+                        new_cache[milestone_key] = "posted"
+                        new_cache[f"milestone_{match_id}_{player_name}_50"] = "posted"
+                    else:
+                        success = post_to_facebook(msg)
+                        if success:
+                            new_cache[milestone_key] = "posted"
+                            new_cache[f"milestone_{match_id}_{player_name}_50"] = "posted"
+                            save_last_post(new_cache)
+                            
+            # Fifty milestone
+            elif runs >= 50:
+                milestone_key = f"milestone_{match_id}_{player_name}_50"
+                if last_post_cache.get(milestone_key) != "posted":
+                    msg = (
+                        f"⭐ **HALF-CENTURY ALERT!** ⭐\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🏆 **Match:** {add_flags_to_title(match_title)}\n\n"
+                        f"🔥 **{player_name}** has reached his **HALF-CENTURY**! 🙌\n"
+                        f"👉 **{runs} runs** off **{balls} balls**! A crucial innings for his team! 🏏💪\n\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"#Cricket #Milestone #Fifty #BattingAlert #CricketFans"
+                    )
+                    print(f"\n--- BATSMAN MILESTONE ALERT (50) ---")
+                    print(msg)
+                    print("-------------------------------------\n")
+                    if dry_run:
+                        new_cache[milestone_key] = "posted"
+                    else:
+                        success = post_to_facebook(msg)
+                        if success:
+                            new_cache[milestone_key] = "posted"
+                            save_last_post(new_cache)
+                            
+    # Check Bowlers Milestones
+    for bowler in bowlers:
+        match = re.match(r'([^\-*]+)\s*-\s*(\d+)/(\d+)\s*\(([^)]+)\)', bowler)
+        if match:
+            player_name = match.group(1).strip()
+            try:
+                wickets = int(match.group(2))
+                runs = int(match.group(3))
+                overs = match.group(4).strip()
+            except ValueError:
+                continue
+                
+            # 5-Wicket Haul milestone
+            if wickets >= 5:
+                milestone_key = f"milestone_{match_id}_{player_name}_5"
+                if last_post_cache.get(milestone_key) != "posted":
+                    msg = (
+                        f"🔥 **5-WICKET HAUL ALERT!** 🔥\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🏆 **Match:** {add_flags_to_title(match_title)}\n\n"
+                        f"🎳 **{player_name}** has taken a sensational **5-WICKET HAUL**! 🌟\n"
+                        f"👉 Outstanding figures of **{wickets}/{runs}** in just **{overs} overs**! Absolutely dismantled! 🎯🙌\n\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"#Cricket #Milestone #5WicketHaul #BowlingHero #CricketFans"
+                    )
+                    print(f"\n--- BOWLER MILESTONE ALERT (5) ---")
+                    print(msg)
+                    print("------------------------------------\n")
+                    if dry_run:
+                        new_cache[milestone_key] = "posted"
+                        new_cache[f"milestone_{match_id}_{player_name}_3"] = "posted"
+                    else:
+                        success = post_to_facebook(msg)
+                        if success:
+                            new_cache[milestone_key] = "posted"
+                            new_cache[f"milestone_{match_id}_{player_name}_3"] = "posted"
+                            save_last_post(new_cache)
+                            
+            # 3-Wicket milestone
+            elif wickets >= 3:
+                milestone_key = f"milestone_{match_id}_{player_name}_3"
+                if last_post_cache.get(milestone_key) != "posted":
+                    msg = (
+                        f"🎯 **3-WICKET HAUL!** 🎯\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🏆 **Match:** {add_flags_to_title(match_title)}\n\n"
+                        f"🎳 **{player_name}** is on fire! He picks up **3 wickets**! 💪\n"
+                        f"👉 Spell figures: **{wickets}/{runs}** in **{overs} overs**! Keeping the pressure high! 🎳🔥\n\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"#Cricket #Milestone #3Wickets #BowlingAlert #CricketFans"
+                    )
+                    print(f"\n--- BOWLER MILESTONE ALERT (3) ---")
+                    print(msg)
+                    print("------------------------------------\n")
+                    if dry_run:
+                        new_cache[milestone_key] = "posted"
+                    else:
+                        success = post_to_facebook(msg)
+                        if success:
+                            new_cache[milestone_key] = "posted"
+                            save_last_post(new_cache)
+
 def post_to_facebook(message):
     """
     Posts the message to the Facebook Page.
@@ -751,6 +982,26 @@ def run_bot(dry_run=False):
                 print(f"[*] Match {info['title']} is a league/non-international preview. Skipping.")
             continue
             
+        # Check if it is a completed match to publish summary
+        is_completed = any(kw in status_lower for kw in ['won by', 'won', 'beat', 'complete', 'completed', 'abandoned', 'no result', 'tie', 'stumps'])
+        if is_completed:
+            summary_key = f"summary_{match_id}"
+            if last_post_cache.get(summary_key) != "posted":
+                print(f"[*] Match completed: {info['title']}. Fetching summary...")
+                summary_msg = get_match_summary_details(match_id, info["title"], info["status"])
+                if summary_msg:
+                    print("\n--- SUMMARY FACEBOOK POST ---")
+                    print(summary_msg)
+                    print("-----------------------------\n")
+                    if dry_run:
+                        new_cache[summary_key] = "posted"
+                    else:
+                        success = post_to_facebook(summary_msg)
+                        if success:
+                            new_cache[summary_key] = "posted"
+                            save_last_post(new_cache)
+            continue
+            
         # Only post matches that are currently active/live
         is_live = False
         
@@ -774,25 +1025,33 @@ def run_bot(dry_run=False):
         # Check if this match's score is updated compared to the last post
         last_state = last_post_cache.get(match_id)
         
-        if last_state == score_state_str:
-            print(f"[*] Match {info['title']}: No changes in score/status. Skipping post.")
-            continue
+        if last_state != score_state_str:
+            # Format the post
+            formatted_message = format_score_post(info)
             
-        # Format the post
-        formatted_message = format_score_post(info)
-        
-        print("\n--- PROFESSIONAL FACEBOOK POST ---")
-        print(formatted_message)
-        print("----------------------------------\n")
-        
-        if dry_run:
-            print("[*] Dry run mode active. Skipping Facebook post.")
-        else:
-            # Post to Facebook
-            success = post_to_facebook(formatted_message)
-            if not success:
-                # If post failed, do not update cache so we try again next time
-                new_cache[match_id] = last_state
+            print("\n--- PROFESSIONAL FACEBOOK POST ---")
+            print(formatted_message)
+            print("----------------------------------\n")
+            
+            if dry_run:
+                print("[*] Dry run mode active. Skipping Facebook post.")
+            else:
+                # Post to Facebook
+                success = post_to_facebook(formatted_message)
+                if not success:
+                    # If post failed, do not update cache so we try again next time
+                    new_cache[match_id] = last_state
+                    
+        # Check and post milestones (runs/wickets)
+        check_and_post_milestones(
+            match_id=match_id,
+            match_title=info["title"],
+            batsmen=info.get("batsmen", []),
+            bowlers=info.get("bowlers", []),
+            dry_run=dry_run,
+            last_post_cache=last_post_cache,
+            new_cache=new_cache
+        )
                 
     # Update cache file
     if not dry_run:
